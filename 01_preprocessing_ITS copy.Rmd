@@ -1,0 +1,389 @@
+---
+title: "01_cleandata"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## Install libraries
+```{r cars}
+library(mctoolsr)
+library(plyr) # always load before tidyverse to avoid conflicts with dplyr
+library(tidyverse) # lazily load all of tidyverse, just in case I want to use it.
+library(vegan)
+#library(plotly)
+library(readr)
+library("RColorBrewer")
+library(viridis)
+```
+
+## Set up input and output directories
+```{r Set up input and output directories, include = FALSE}
+project.fp <- "/Users/coin8046/Desktop/FiererLabNotebook_copy/SunflowerGxE/R.analyses_ITS"
+raw_data.fp <- file.path(project.fp, "00_raw.data")
+raw_metadata.fp <- "/Users/coin8046/Desktop/FiererLabNotebook_copy/SunflowerGxE/r_analyses/00_raw.data"
+clean_data.fp <- file.path(project.fp, "01_clean.data")
+    figures_01_clean.fp <- file.path(clean_data.fp, "figures")
+    outputs_01_clean.fp <- file.path(clean_data.fp, "outputs")
+
+if (!dir.exists(clean_data.fp)) {dir.create(clean_data.fp, recursive = TRUE)}    
+if (!dir.exists(figures_01_clean.fp)) {dir.create(figures_01_clean.fp, recursive = TRUE)}
+if (!dir.exists(outputs_01_clean.fp)) {dir.create(outputs_01_clean.fp, recursive = TRUE)}
+```
+
+## Read in data
+```{r Read in data, include = FALSE}
+# ASV generated from DADA2, with sequence inference on pooled samples
+tax_table_fp <- paste0(raw_data.fp, '/seqtab_wTax_mctoolsr.txt')
+
+# forwards read only ("R1") ASV table
+# tax_table.R1_fp <- paste0(raw_data.fp, '/seqtab_wTax_mctoolsr.R1.txt')
+
+# mapping file with (minimal) sample info
+map_fp <- paste0(raw_metadata.fp, '/sunflower_metadata1.txt')
+#tmp_map <- read_table(file = paste0(raw_data.fp, '/mapping_file_mm_ITS.txt'), col_names = TRUE)
+
+# load data via mctoolsr
+input <- load_taxa_table(tax_table_fp, map_fp)
+
+#input.R1 <- load_taxa_table(tax_table.R1_fp, map_fp)
+
+
+## extract just map file for later plotting
+map.r <- input$map_loaded %>% rownames_to_column(var = 'sample_id')
+```
+
+### read in other metadata
+```{r}
+# read in other metadata
+## sunflower species
+spc.entries <- read.csv(paste0(raw_metadata.fp, '/sunflower_entries.csv'))
+## sclerotinia resistance
+scl.res <- read.csv(paste0(raw_metadata.fp, '/SclIncidenceMeansCarrington2017.csv'))
+## gps coordinates
+gps.loc <- read.csv(paste0(raw_metadata.fp, '/microbiomeGxEsites_gpscoords.csv'))
+```
+
+### Adjust mapping file
+```{r}
+# adjust mapping file to add condition, soil type, sterility columns
+map.rr <- map.r %>% 
+  left_join(data.frame(ReadCount.raw = colSums(input$data_loaded)) %>%
+               rownames_to_column(), by = c("sample_id" = "rowname")) %>% 
+  # left_join(data.frame(ReadCount.filt = colSums(input_filt.f$data_loaded)) %>%
+  #              rownames_to_column(), by = c("sample_id" = "rowname")) %>% 
+  mutate(Rownames = sample_id) %>% 
+  column_to_rownames(var = "Rownames")
+
+# merge species id info 
+spc.entries.rr <- spc.entries %>% 
+  mutate(plot_id = paste0(Site, "_", Plot))
+
+# fix entry ID 
+scl.res1 <- scl.res %>% 
+  mutate(Entry = gsub(Line.name, pattern = "(.{2})(.*)", replacement = "\\1 \\2"))
+
+
+map.rrr <- map.rr %>% 
+  mutate(plot_id = paste0(Location, "_", plot)) %>% 
+  left_join(spc.entries.rr, by = "plot_id") %>% 
+  left_join(gps.loc, by = "Location") %>% 
+  left_join(scl.res1, by = "Entry")
+
+input$map_loaded <- map.rrr %>% 
+  column_to_rownames(var = "sample_id")
+
+# input.R1$map_loaded <- map
+```
+
+### Filtering
+#### R1/R2
+```{r}
+# calculate raw reads per sample
+reads0 <- input$data_loaded %>% colSums() %>% sum()
+
+### remove taxa not classified at phylum level
+input.f1 <- filter_taxa_from_input(input = input, taxa_to_remove = "NA", at_spec_level = 2)
+
+# calculate reads after first filer
+reads1 <- input.f1$data_loaded %>% colSums() %>% sum()
+
+# count taxa not identified at phylum level
+input.NA <- filter_taxa_from_input(input = input, taxa_to_keep = "NA", at_spec_level = 2)
+reads2 <- input.NA$data_loaded %>% colSums() %>% sum()
+
+
+reads2/reads0
+# 0.07328292
+reads1/reads0
+# 0.9267171
+
+
+### remove low read count ASVs (< 15 reads across dataset)
+ASV_reads <- input.f1$data_loaded %>% rowSums()
+low_asvs.df <- ASV_reads %>% 
+  as.data.frame() %>% 
+  filter(. < 15) %>% 
+  rownames_to_column(var = "ASV")
+low_asvs <- unlist(low_asvs.df$ASV)
+
+input.f2 <- filter_taxa_from_input(input = input.f1, taxa_IDs_to_remove = low_asvs )
+
+### remove really low read count samples
+sort(colSums(input.f2$data_loaded))
+input.f <- filter_samples_by_counts(input = input.f2, min_seqs = 600)
+```
+
+####R1 
+```{r}
+# calculate raw reads per sample
+reads0 <- input.R1$data_loaded %>% colSums() %>% sum()
+
+### remove taxa not classified at phylum level
+input_R1.f1 <- filter_taxa_from_input(input = input.R1, taxa_to_remove = "NA", at_spec_level = 2)
+
+# calculate reads after first filer
+reads1 <- input_R1.f1$data_loaded %>% colSums() %>% sum()
+
+# count taxa not identified at phylum level
+input_R1.NA <- filter_taxa_from_input(input = input.R1, taxa_to_keep = "NA", at_spec_level = 2)
+reads2 <- input_R1.NA$data_loaded %>% colSums() %>% sum()
+
+
+reads2/reads0
+reads1/reads0
+
+
+### remove low read count ASVs (< 50 reads across dataset)
+ASV_reads <- input_R1.f1$data_loaded %>% rowSums()
+low_asvs.df <- ASV_reads %>% 
+  as.data.frame() %>% 
+  filter(. < 50) %>% 
+  rownames_to_column(var = "ASV")
+low_asvs <- unlist(low_asvs.df$ASV)
+
+input_R1.f2 <- filter_taxa_from_input(input = input_R1.f1, taxa_IDs_to_remove = low_asvs )
+
+### remove really low read count samples
+input_R1.f <- filter_samples_by_counts(input = input_R1.f2, min_seqs = 200)
+```
+
+### What are the read depth statistics?
+```{r}
+cat('Summary read depth statistics: raw reads, R1 & R2')
+raw_reads_per_sample.p <- sort(colSums(input$data_loaded))
+summary(raw_reads_per_sample.p)
+   # Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+   #    0   17340   24416   24945   33101   61327 
+
+sum(raw_reads_per_sample.p)
+#15191220
+nrow(input$data_loaded)
+#18969
+
+cat('Summary read depth statistics: filtered data')
+filt.reads_per_sample.p <- sort(colSums(input.f$data_loaded))
+summary(filt.reads_per_sample.p)
+   # Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+   # 2700   16368   22994   23935   31267   59607
+
+sum(filt.reads_per_sample.p)
+# [1] 14049728
+nrow(input.f$data_loaded)
+# [1] 5625
+
+### R1 only
+
+cat('Summary read depth statistics: raw reads, R1 only')
+raw.R1_reads_per_sample.p <- sort(colSums(input.R1$data_loaded))
+summary(raw.R1_reads_per_sample.p )
+
+sum(raw.R1_reads_per_sample.p)
+nrow(input.R1$data_loaded)
+
+
+cat('Summary read depth statistics: filtered data, R1 only')
+filt.R1_reads_per_sample.p <- sort(colSums(input_R1.f$data_loaded))
+summary(filt.R1_reads_per_sample.p )
+
+sum(filt.R1_reads_per_sample.p)
+nrow(input_R1.f$data_loaded)
+```
+
+### Normalization
+#### Relative abundance
+```{r}
+### convert filtered dataframe to relative abundance
+
+input.f.rl <- convert_to_relative_abundances(input.f)
+```
+
+#### Rarefaction
+```{r}
+sort(colSums(input.f$data_loaded))
+
+input_rar1 <- single_rarefy(input, 2700)
+input_rar2 <- single_rarefy(input, 10000)
+
+
+
+# input_rar1 <- single_rarefy(input_R1.f, 1000)
+# input_rar2 <- single_rarefy(input_R1.f, 10000)
+
+```
+
+
+##### plotting settings
+```{r}
+pair.pal2 <- c("#FFFF99", "#1F78B4", "#33A02C", "#E31A1C", "#FF7F00", "#6A3D9A", "#A6CEE3","#B2DF8A","#FB9A99","#FDBF6F","#CAB2D6")
+```
+
+### Blank check
+```{r}
+input_blank <- filter_data(input = input, filter_cat = "Sample_type", keep_vals = "blank")
+
+blank_df <- input_blank$data_loaded %>% 
+  mutate(asv_reads = rowSums(.[1:ncol(input_blank$data_loaded)])) %>% 
+  mutate(asv_ubiq = rowSums(.[1:ncol(input_blank$data_loaded-1)] !=0)) %>% 
+  rownames_to_column(var = "ASV") %>% 
+  inner_join(input_blank$taxonomy_loaded, by = c("ASV" = "taxonomy7")) %>% 
+  mutate(ASV2 = ASV) %>% 
+  select(-c("taxonomy1", "taxonomy8", "taxonomy4")) %>% 
+  column_to_rownames(var = "ASV")
+  
+nrow(blank_df)
+# 25
+
+input_check <- filter_samples_by_counts(input = input, min_seqs = 100)
+input_check.rl <- convert_to_relative_abundances(input = input_check)
+```
+
+
+
+
+### Sample summary info
+```{r}
+### calculating sample summary info
+input.f_samples = filter_data(input.f, 'Sample_type', keep_vals = c("sample"))
+
+
+#num reads / sample
+summary(colSums(input.f_samples$data_loaded))
+   # Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+   # 2700   16368   22994   23935   31267   59607 
+
+
+#num asvs / sample
+summary(colSums(input.f_samples$data_loaded !=0))
+   # Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+   # 45.0   121.0   148.0   146.3   171.0   262.0
+
+```
+
+#### colors for plotting
+```{r}
+rainbow15 <- wes_palette("Zissou1", 15, type = "continuous")
+rainbow10 <- wes_palette("Zissou1", 10, type = "continuous")
+pal11 <- c("#D53E4F",  "#FDAE61", "#ABDDA4","#9E0142", "#66C2A5", "#3288BD", "#5E4FA2", "#F46D43","#E6F598",  "#5BA9BC", "#708090")
+smkmtn6 <- park_palette("SmokyMountains", 6)
+```
+
+
+### Compare Samples and Blanks
+#### NMDS Visualization
+```{r, include=FALSE}
+#### Visualization: NMDS relative abundance (all > 100 reads)
+## distance matrix for plotting
+sb_transformed <- t(sqrt(input_check.rl$data_loaded))
+sb.dm <- vegdist(sb_transformed, method = "bray", na.rm = TRUE)
+sb.nmds <- metaMDS(sb.dm, k = 2, trymax = 500)
+
+## plot nmds
+nmds_all <- plot_ordination(input = input_check.rl, ordination_axes = sb.nmds$points, color_cat = 'Sample_type')+
+  ggtitle("NMDS plot of all samples (relative abundance)")
+nmds_all
+
+#### Visualization: NMDS relative abundance (by location)
+## distance matrix for plotting
+sall_transformed <- t(sqrt(input_rar2$data_loaded))
+dm <- vegdist(sall_transformed, method = "bray", na.rm = TRUE)
+sall.nmds <- metaMDS(dm, k = 2, trymax = 500)
+
+input_rar2$map_loaded$Rep <- as.factor(input_rar2$map_loaded$Rep)
+## plot nmds
+nmds_all <- plot_ordination(input = input_rar2, ordination_axes = sall.nmds$points, color_cat = 'Location', shape_cat = 'Rep')+
+  ggtitle("NMDS plot of all samples (ITS reads, rarefied 10k), colored by location")
+nmds_all
+
+#### Visualization: NMDS relative abundance (by sclerotinia resistance)
+## plot nmds
+nmds_scl <- plot_ordination(input = input_rar2, ordination_axes = sall.nmds$points, color_cat = 'Average.of.percent.incidence')+
+  scale_color_viridis(option = "magma", begin = 0.2, end = 0.8, discrete = FALSE)+
+  ggtitle("NMDS plot of all samples (ITS reads, rarefied 10k), colored by Sclerotinia resistance")
+nmds_scl
+```
+
+#### individual locations
+```{r}
+input_Grandin <- filter_data(input = input_rar2, filter_cat = "Location", keep_vals = "Grandin")
+input_Lindsborg.dry <- filter_data(input = input_rar2, filter_cat = "Location", keep_vals = "Lindsborg-dryland")
+input_Lindsborg.irr <- filter_data(input = input_rar2, filter_cat = "Location", keep_vals = "Lindsborg-irrigated")
+input_McLaughlin <- filter_data(input = input_rar2, filter_cat = "Location", keep_vals = "McLaughlin")
+input_Land.inst <- filter_data(input = input_rar2, filter_cat = "Location", keep_vals = "Land Institute")
+```
+##### NMDS visualizations
+```{r}
+## NMDS ordinations by location
+location_input <- input_Land.inst
+location_input$map_loaded$Rep <- as.factor(location_input$map_loaded$Rep)
+
+## distance matrix for plotting
+sb_transformed.loc <- t(sqrt(location_input$data_loaded))
+dm.loc <- vegdist(sb_transformed.loc, method = "bray")
+sb.loc.nmds <- metaMDS(dm.loc, k = 2, trymax = 1000)
+
+#names(input_filt_rar$map_loaded)
+
+## plot nmds
+nmds_loc <- plot_ordination(input = location_input, ordination_axes = sb.loc.nmds$points, color_cat = 'Entry', shape_cat = "Rep", hulls = TRUE)+ #Entry, Location, Average.of.percent.incidence, LONG, LAT
+  ggtitle("NMDS plot of Grandin - colored by genotype")+
+  scale_color_manual(values = pal11)+
+  scale_fill_manual(values = pal11)
+  #scale_color_viridis(option = "magma", begin = 0.2, end = 0.8, discrete = TRUE)
+  #theme(legend.position = "none")
+nmds_loc
+```
+
+
+
+### Richness and top taxa
+```{r}
+plot_diversity(input = input.R1_slrsol, variable = 'sample_type_2', metric = 'richness')+
+  scale_fill_manual(values=pair.pal2)+
+  geom_point()
+
+plot_diversity(input = input.R1_rhizo, variable = 'condition', metric = 'richness')+
+  scale_fill_manual(values=pair.pal2)+
+  ggtitle("rhizosphere richness by condition")
+
+plot_diversity(input = input.R1_seed, variable = 'condition', metric = 'richness')+
+  scale_fill_manual(values=pair.pal2)+
+  ggtitle("seed richness by condition")
+```
+
+### Save cleaned / filtered dataframes
+```{r}
+## clean raw data
+saveRDS(object = input_R1.f, file = paste0(outputs_01_clean.fp, "/input_filt.RDS"))
+input_R1.f <- readRDS(file = paste0(outputs_01_clean.fp, "/input_filt.RDS"))
+
+## relative abundance
+saveRDS(object = input.f.rl, file = paste0(outputs_01_clean.fp, "/input_filt_rl.RDS"))
+
+## clean data rarefied (1000,10000 reads)
+saveRDS(object = input.R1_rar1, file = paste0(outputs_01_clean.fp, "/input_rar1k.RDS"))
+saveRDS(object = input.R1_rar2, file = paste0(outputs_01_clean.fp, "/input_rar10k.RDS"))
+```

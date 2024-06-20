@@ -1,0 +1,168 @@
+---
+title: "08_Cluster97"
+output: html_document
+---
+## Load libraries
+```{r}
+library(mctoolsr)
+library(plyr) # always load before tidyverse to avoid conflicts with dplyr
+library(dplyr)
+library(tidyverse) # lazily load all of tidyverse, just in case I want to use it.
+library(vegan)
+library(MASS)
+library(wesanderson)
+library(viridis)
+library(edgeR)
+library(car)
+library(performance)
+library(lme4)
+library(nlme)
+library(lmerTest)
+library(compositions)
+library(ggplot2)
+
+library(DECIPHER)
+library(Biostrings)
+
+# if (!require("BiocManager", quietly = TRUE))
+#     install.packages("BiocManager")
+# 
+# BiocManager::install("DECIPHER")
+# iocManager::install("Biostrings")
+```
+
+### Set up input and output directories
+```{r Set up input and output directories, include = FALSE}
+project.fp <- "/Users/coin8046/Desktop/FiererLabNotebook_copy/SunflowerGxE/r_analyses"
+
+climate_05.fp <- file.path(project.fp, "05_ClimateData")
+    outputs_05.fp <- file.path(climate_05.fp, "outputs")
+    
+cluster_08.fp <- file.path(project.fp, "08_Cluster97")
+    figures_08.fp <- file.path(cluster_08.fp, "figures")
+    outputs_08.fp <- file.path(cluster_08.fp, "outputs")
+
+ if (!dir.exists(cluster_08.fp)) {dir.create(cluster_08.fp, recursive = TRUE)}
+ if (!dir.exists(figures_08.fp)) {dir.create(figures_08.fp, recursive = TRUE)}
+ if (!dir.exists(outputs_08.fp)) {dir.create(outputs_08.fp, recursive = TRUE)}
+```
+
+### Read in data
+NOTE: ASVs clustered into OTUs using DECIPHER
+See xxxx on Innes server:
+```{r}
+## OTU clustered data
+c97_df <- readRDS("/Users/coin8046/Desktop/FiererLabNotebook_copy/SunflowerGxE/r_analyses/00_raw.data/merged_seqtab.RDS")
+
+## get metadata
+input_filt <- readRDS(paste0(outputs_05.fp, "/input.filtC.RDS"))
+
+# new input for otus
+input_OTU97 <- input_filt
+input_OTU97$data_loaded <- c97_df %>% t() %>% 
+```
+
+### normalize data in any way?
+```{r}
+sort(rowSums(c97_df))
+
+# rarefy
+input_OTU97_rar <- single_rarefy(input = input_OTU97, depth = 10000)
+
+# potentially try CLR, TMM, P/A later on depending on modeling approach
+
+```
+
+### final df for model
+```{r}
+OTU97.df <- input_OTU97_rar$data_loaded %>% t() %>% as.data.frame() %>% 
+  rownames_to_column(var = "sample.id") %>% 
+  inner_join(input_filt$map_loaded, by = c("sample.id" = "BoxCell")) %>% 
+  column_to_rownames(var = "sample.id")
+```
+
+### get top OTUs for testing
+```{r}
+top_OTUs <- input_OTU97_rar$data_loaded %>% 
+  rowSums(.) %>% 
+  sort(decreasing = TRUE) %>% 
+  head(n = 20)
+
+# OTU_436 OTU_3333 OTU_3610 OTU_2179  OTU_257  OTU_489 OTU_2833 OTU_3279 OTU_1372 OTU_3238
+# OTU_3612  OTU_430  OTU_835 OTU_2987 OTU_3390 OTU_1217 OTU_2373 OTU_3618 OTU_3634 OTU_3622
+```
+
+
+### Make models
+#### OTU abundance input
+```{r}
+lmer1 <- lmer(OTU_489 ~ Entry + (1| Location/Entry), OTU97.df)
+summary(lmer1)
+
+lmer2 <- lmer(OTU_489 ~ Average.of.percent.incidence + (1| Location/Entry), OTU97.df)
+summary(lmer2)
+
+lmer3 <- lmer(OTU_489 ~ 1 + (1|Entry) + (1 |Location), OTU97.df)
+summary(lmer3)
+#boundary (singular) fit: see help('isSingular')
+
+lmer4 <- lmer(OTU_489 ~ (1|Entry) + (1 |LAT), OTU97.df)
+summary(lmer4)
+# boundary (singular) fit: see help('isSingular')
+
+lmer5 <- lmer(OTU_489 ~ (1|Entry) + (1 |LAT) + (1 | Rep) + (1|Average.of.percent.incidence), OTU97.df)
+summary(lmer5)
+# boundary (singular) fit: see help('isSingular')
+
+lmer6 <- lmer(OTU_3279 ~ (1 |Location) + (1 | Rep) + (1|Average.of.percent.incidence), OTU97.df)
+summary(lmer6)
+
+lmer7 <- lmer(OTU_3279 ~ (1 |Location) + (1|Average.of.percent.incidence), OTU97.df)
+summary(lmer7)
+
+lmer8 <- lmer(OTU_3279 ~ (1 |Location) + (1|Entry), OTU97.df)
+summary(lmer8)
+```
+
+### model loop lmer
+```{r}
+## length of the asv list (so the loop knows how many times to loop)
+iterations = nrow(input_OTU97_rar$data_loaded)
+
+## length of model output (3 variables + residuals, variance & SD)
+variables = 6
+
+## make an empty matrix to store results
+lmer_output <- matrix(ncol=variables, nrow=iterations) #iterations
+
+## test output 
+test <- lmer(OTU97.df[,3] ~ (1 |Location) + (1|Entry), data = OTU97.df)
+summary(test)
+re_dat = as.data.frame(VarCorr(test))
+# Then access each individual value:
+loc_vcov = re_dat[1,'vcov']
+resid_vcov = re_dat[2,'vcov']
+c(unlist(re_dat[,4]), unlist(re_dat[,5]))
+
+## loop model over all ASVs
+for (i in 1:iterations){
+tmp_lmer <- lmer(OTU97.df[,i] ~ (1 |Location) + (1|Entry), data = OTU97.df)
+tmp_redat <- as.data.frame(VarCorr(tmp_lmer))
+tmp_row <- c(unlist(tmp_redat[,4]), unlist(tmp_redat[,5]))
+lmer_output[i,] <- tmp_row 
+}
+
+#NOTE: "boundary (singular) fit: see help('isSingular')" output for most of loop
+
+#convert back to dataframe
+lmer_output <- as.data.frame(lmer_output)
+
+#format row and column names
+names(lmer_output) <- c("Location.Var", "API.Var", "Rep.Var", "Resid.Var", "Location.SD", "API.SD", "Rep.SD", "Resid.SD")
+
+rownames(lmer_output) <- colnames(c97_df)
+
+#save output
+saveRDS(object = lmer_output, file = paste0(outputs_08.fp, "/lmer.all.output.RDS"))
+
+```

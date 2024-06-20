@@ -1,0 +1,305 @@
+---
+title: "01_preprocess"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(fig.width=10, fig.height=6, fig.path='Figs/',
+                      echo=FALSE, warning=FALSE)
+
+#tinytex::install_tinytex()
+```
+
+## Load libraries
+```{r}
+#install.packages("devtools")
+#devtools::install_github("leffj/mctoolsr")
+
+library(mctoolsr)
+library(plyr) # always load before tidyverse to avoid conflicts with dplyr
+library(tidyverse) # lazily load all of tidyverse, just in case I want to use it.
+library(vegan)
+library(readr)
+library(RColorBrewer)
+#library(forcats) # for neat ordering of factors when graphing
+#library(ggrepel) # for making nice repelling labels
+
+set.seed(10)
+```
+
+## Set up input and output directories
+```{r Set up input and output directories, include = FALSE}
+project.fp <- "/Users/coin8046/Desktop/FiererLabNotebook_copy/SunflowerGxE/r_analyses"
+raw_data.fp <- file.path(project.fp, "00_raw.data")
+clean_data.fp <- file.path(project.fp, "01_clean.data")
+    figures_01_clean.fp <- file.path(clean_data.fp, "figures")
+    outputs_01_clean.fp <- file.path(clean_data.fp, "outputs")
+
+# if (!dir.exists(clean_data.fp)) {dir.create(clean_data.fp, recursive = TRUE)}    
+# if (!dir.exists(figures_01_clean.fp)) {dir.create(figures_01_clean.fp, recursive = TRUE)}
+# if (!dir.exists(outputs_01_clean.fp)) {dir.create(outputs_01_clean.fp, recursive = TRUE)}
+
+```
+
+## Read in data
+```{r Read in data, include = FALSE}
+# sequence table  generated from DADA2, with sequence inference on pooled samples
+tax_table_fp <- paste0(raw_data.fp, '/seqtab_wTax_mctoolsr.txt')
+#tmp_tab <- read.delim(tax_table_fp, header = FALSE)
+
+# mapping file with (minimal) sample info
+map_fp <- paste0(raw_data.fp, '/sunflower_metadata1.txt')
+#tmp_map <- read.delim(map_fp, header = TRUE) 
+
+# load data via mctoolsr
+input <- load_taxa_table(tax_table_fp, map_fp)
+
+## extract just map file for later plotting
+map.r <- input$map_loaded %>% rownames_to_column(var = 'sample_id')
+
+# read in other metadata
+## sunflower species
+spc.entries <- read.csv(paste0(raw_data.fp, '/sunflower_entries.csv'))
+## sclerotinia resistance
+scl.res <- read.csv(paste0(raw_data.fp, '/SclIncidenceMeansCarrington2017.csv'))
+## gps coordinates
+gps.loc <- read.csv(paste0(raw_data.fp, '/microbiomeGxEsites_gpscoords.csv'))
+
+```
+
+
+## Initial summary of sequencing results
+#### Filtering to remove chloroplast, mitochondria
+#### Filtering to remove non-bacterial reads
+```{r}
+cat('host asvs removed')
+input_filt <- filter_taxa_from_input(input, taxa_to_remove = c("Chloroplast","Mitochondria", "Eukaryota"))
+(input_filt$data_loaded %>% colSums() %>% sum()) / (input$data_loaded %>% colSums() %>% sum())
+
+cat('nonbacterial asvs removed')
+input_filt.f1 <- filter_taxa_from_input(input_filt, at_spec_level = 2, taxa_to_remove = "NA")
+(input_filt.f1$data_loaded %>% colSums() %>% sum()) / (input$data_loaded %>% colSums() %>% sum())
+```
+
+### Adjust mapping file
+```{r}
+# add in counts per sample
+map.rr <- map.r %>% 
+  left_join(data.frame(ReadCount.raw = colSums(input$data_loaded)) %>%
+               rownames_to_column(), by = c("sample_id" = "rowname")) %>% 
+  left_join(data.frame(ReadCount.filt = colSums(input_filt.f1$data_loaded)) %>%
+               rownames_to_column(), by = c("sample_id" = "rowname")) %>% 
+  mutate(Rownames = sample_id) %>% 
+  column_to_rownames(var = "Rownames") %>% 
+  mutate(plot_id = paste0(Location, "_", plot))
+
+# merge species id info 
+spc.entries.rr <- spc.entries %>% 
+  mutate(plot_id = paste0(Site, "_", Plot))
+
+# fix entry ID 
+scl.res1 <- scl.res %>% 
+  mutate(Entry = gsub(Line.name, pattern = "(.{2})(.*)", replacement = "\\1 \\2"))
+
+# join other metadata to mapping file
+map.rrr <- map.rr %>% 
+  left_join(spc.entries.rr, by = "plot_id") %>% 
+  left_join(gps.loc, by = "Location") %>% 
+  left_join(scl.res1, by = "Entry")
+
+# add metadata back to mctoolsr object for easier downstream processing
+input_filt.f1$map_loaded <- map.rrr %>% 
+  column_to_rownames(var = "sample_id")
+```
+
+### remove super low read count samples and ASVs
+```{r}
+# remove ASVs with fewer than 20 reads across dataset
+low.tmp <- input_filt.f1$data_loaded %>% 
+  mutate(reads = rowSums(.)) %>% 
+  filter(reads < 21)
+
+lowASVs <- row.names(low.tmp)
+
+input_filt.f2 <- filter_taxa_from_input(input = input_filt.f1, taxa_IDs_to_remove =  lowASVs)
+#50783 taxa removed
+
+
+# remove samples with less than 10 reads
+input_filt.f <- filter_samples_by_counts(input = input_filt.f2, min_seqs = 10)
+# 600 samples remaining
+```
+
+
+#### What are the read depth statistics?
+```{r}
+cat('Summary read depth statistics: raw reads')
+raw_reads_per_sample.p <- sort(colSums(input$data_loaded))
+summary(raw_reads_per_sample.p)
+
+cat('Summary read depth statistics: host reads removed')
+ncnm_reads_per_sample.p <- sort(colSums(input_filt.f$data_loaded))
+summary(ncnm_reads_per_sample.p)
+```
+
+What is the percent mitochondria/chloroplast? (in pooled data)
+```{r}
+# Calculate Total ASVs
+tot_reads.p <- input$data_loaded %>% colSums()
+tot_reads_sum.p <- tot_reads.p %>% sum()
+
+# Reads without chloroplast and mitochondria
+reads_nc_nm.p <- input_filt.f$data_loaded %>% colSums()
+reads_nc_nm_sum.p <- reads_nc_nm.p %>% sum()
+
+# Chloroplast sum
+chloroplast_reads.p <- input$data_loaded %>%
+  rownames_to_column(var = "ESV_ID") %>%
+  full_join(input$taxonomy_loaded %>%
+              rownames_to_column(var = "ESV_ID"),
+            by = "ESV_ID") %>% 
+  filter(taxonomy4 == "Chloroplast") %>%
+  select(-c(1)) %>%
+  select(!starts_with("t")) %>%
+  colSums() %>% sort(decreasing = TRUE)
+
+chloroplast_prop.p <- sum(chloroplast_reads.p)/tot_reads_sum.p
+
+# Mitochondria sum
+mito_reads.p <- input$data_loaded %>%
+  rownames_to_column(var = "ESV_ID") %>%
+  full_join(input$taxonomy_loaded %>%
+              rownames_to_column(var = "ESV_ID"),
+            by = "ESV_ID") %>% 
+  filter(taxonomy5 == "Mitochondria") %>%
+  select(-1) %>%
+  select(!starts_with("t")) %>%
+  colSums() %>% sort(decreasing = TRUE)
+
+mito_prop.p <- sum(mito_reads.p)/tot_reads_sum.p
+
+#'
+#' Total reads
+# tot_reads
+cat('Total reads:',tot_reads_sum.p)
+
+#' Percent chloroplast
+cat('Percent chloroplast:', chloroplast_prop.p * 100)
+
+#' Percent mitochondria
+cat('Percent mitochondria:', mito_prop.p * 100)
+
+# tot reads after filtering
+# Calculate Total ASVs (pooled)
+tot_reads.f <- input_filt.f$data_loaded %>% colSums()
+tot_reads_sum.f <- tot_reads.f %>% sum()
+
+# tot ASVs
+nrow(input_filt.f$data_loaded)
+```
+
+### Investigate blanks for contamination information
+#### blank data frame
+```{r}
+## make blank specific dataframe
+input_blanks = filter_data(input_filt.f, filter_cat = 'Sample_type', keep_vals = "blank")
+
+blank_df <- input_blanks$data_loaded %>% 
+  mutate(asv_reads = rowSums(.[1:ncol(input_blanks$data_loaded)])) %>% 
+  mutate(asv_ubiq = rowSums(.[1:ncol(input_blanks$data_loaded-1)] !=0)) %>% 
+  rownames_to_column(var = "ASV") %>% 
+  left_join(input_blanks$taxonomy_loaded, by = c("ASV" = "taxonomy7"))
+
+summary(blank_df$asv_reads)
+summary(blank_df$asv_ubiq)
+
+# NOTE: no notable contaminants that need to be removed
+```
+
+
+
+
+### Normalization
+#### Rarefaction
+```{r Rarefaction (pooled), message = FALSE}
+sort(colSums(input_filt.f$data_loaded), decreasing = TRUE)
+
+rar_level0 <- 50
+rar_level1 <- 9000
+rar_level2 <- 15000
+
+readcount_hist_all <- data.frame(ReadCounts = sort(colSums(input_filt.f$data_loaded))) %>%
+  rownames_to_column(var = "SampleID") %>%
+  ggplot() +
+  geom_histogram(aes(x = ReadCounts)) + 
+  geom_vline(xintercept = rar_level0, color = "green") +
+  geom_vline(xintercept = rar_level1, color = "red") +
+  geom_vline(xintercept = rar_level2, color = "blue") +
+  xlab("# reads")+
+  ylab("# samples")+
+  theme_bw(base_size = 14)+
+  ggtitle("Histogram of Read Counts (filtered)")
+readcount_hist_all
+```
+
+##### create rarefied dataframes
+```{r Make rarefied dataframes (pooled), message = FALSE}
+### filtered, unthresholded data
+input_filt_rar0 <- single_rarefy(input_filt.f, rar_level0)
+input_filt_rar1 <- single_rarefy(input_filt.f, rar_level1)
+```
+
+#### create relative abundance dataframes
+```{r relative abundance dataframes}
+# psuedo pooled
+input_filt_relab <- convert_to_relative_abundances(input = input_filt.f)
+colSums(input_filt_relab$data_loaded)
+```
+
+### make sample dataframes (remove blanks)
+```{r}
+# nonnormalized samples only dataset
+input_f_samps = filter_data(input_filt.f, 'Sample_type', keep_vals = "sample")
+
+# rarefied samples only dataset
+input_rar_samps = filter_data(input_filt_rar1, 'Sample_type', keep_vals = "sample")
+
+# relative abundance samples only dataset
+input_rl_samps = filter_data(input_filt_relab, 'Sample_type', keep_vals = "sample")
+
+```
+
+## save dataframes for downstream uses
+```{r}
+## clean raw data
+saveRDS(object = input_f_samps, file = paste0(outputs_01_clean.fp, "/input_filt.RDS"))
+
+## rarefied raw data (9000 reads)
+saveRDS(object = input_rar_samps, file = paste0(outputs_01_clean.fp, "/input_filt_rar9k.RDS"))
+
+## relative abundance filt data
+saveRDS(object = input_rl_samps, file = paste0(outputs_01_clean.fp, "/input_filt_relab.RDS"))
+
+```
+
+
+### Compare Samples and Blanks
+##### NMDS Visualization
+```{r, include=FALSE}
+#### Visualization: NMDS filtered (pooled)
+## distance matrix for plotting
+input_filt_rl <- convert_to_relative_abundances(input_filt.f)
+sb_transformed <- t(sqrt(input_filt_rl$data_loaded))
+dm <- vegdist(sb_transformed, method = "bray")
+sb.nmds <- metaMDS(dm, k = 2, trymax = 50)
+
+## plot nmds
+nmds_all <- plot_ordination(input = input_filt_rl, ordination_axes = sb.nmds$points, color_cat = 'Sample_type')+
+  ggtitle("NMDS plot of all samples (relative abundance")
+nmds_all
+
+ggsave(nmds_all, filename = paste0(figures_01_clean.fp, "/nmdsall_rl.png"), height = 8, width = 10)
+```
+
+
+

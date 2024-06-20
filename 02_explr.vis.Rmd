@@ -1,0 +1,436 @@
+---
+title: "02_explr.vis"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load libraries
+```{r}
+library(mctoolsr)
+library(plyr) # always load before tidyverse to avoid conflicts with dplyr
+library(tidyverse) # lazily load all of tidyverse, just in case I want to use it.
+library(vegan)
+library(readr)
+library(RColorBrewer)
+library(wesanderson)
+library(viridis)
+library(geosphere)
+library(sf)
+library(nationalparkcolors)
+#library(forcats) # for neat ordering of factors when graphing
+#library(ggrepel) # for making nice repelling labels
+
+set.seed(10)
+```
+
+### Set up input and output directories
+```{r Set up input and output directories, include = FALSE}
+project.fp <- "/Users/coin8046/Desktop/FiererLabNotebook_copy/SunflowerGxE/r_analyses"
+raw_data.fp <- file.path(project.fp, "00_raw.data")
+clean_data.fp <- file.path(project.fp, "01_clean.data")
+    figures_01_clean.fp <- file.path(clean_data.fp, "figures")
+    outputs_01_clean.fp <- file.path(clean_data.fp, "outputs")
+
+explr_02.fp <- file.path(project.fp, "02_exploration")
+    figures_02.fp <- file.path(explr_02.fp, "figures")
+    outputs_02.fp <- file.path(explr_02.fp, "outputs")
+
+# if (!dir.exists(explr_02.fp)) {dir.create(explr_02.fp, recursive = TRUE)}
+# if (!dir.exists(figures_02.fp)) {dir.create(figures_02.fp, recursive = TRUE)}
+# if (!dir.exists(outputs_02.fp)) {dir.create(outputs_02.fp, recursive = TRUE)}
+```
+
+### Read in 16S data
+```{r}
+## cleaned data
+input_filt <- readRDS(paste0(outputs_01_clean.fp, "/input_filt.RDS"))
+
+## rarefied data
+input_rar <- readRDS(paste0(outputs_01_clean.fp, "/input_filt_rar9k.RDS"))
+
+## relative abundance data
+input_relab <- readRDS(paste0(outputs_01_clean.fp, "/input_filt_relab.RDS"))
+
+```
+
+#### colors for plotting
+```{r}
+rainbow15 <- wes_palette("Zissou1", 15, type = "continuous")
+rainbow10 <- wes_palette("Zissou1", 10, type = "continuous")
+pal11 <- c("#D53E4F",  "#FDAE61", "#ABDDA4","#9E0142", "#66C2A5", "#3288BD", "#5E4FA2", "#F46D43","#E6F598",  "#5BA9BC", "#708090")
+smkmtn6 <- park_palette("SmokyMountains", 6)
+```
+
+
+### Stacked bar visualization
+```{r}
+# summarize taxonomy at phyla level
+ts_phyla_rhizo <- summarize_taxonomy(input = input_rar_samps, level = 2, report_higher_tax =  FALSE)
+
+# summarize taxonomy at class level
+ts_class_rhizo <- summarize_taxonomy(input = input_rar_samps, level = 3, report_higher_tax =  FALSE)
+rowSums(ts_class_rhizo) %>% sort(decreasing = TRUE)
+# top 9 classes: 
+# Verrucomicrobiae, Bacteroidia, Nitrososphaeria, Gammaproteobacteria, Actinobacteria, 
+# Planctomycetes, Alphaproteobacteria, Blastocatellia, Phycisphaerae 
+
+
+# reorder classes based on abundance of alphaproteos, for later plotting
+order.p <- input_rar_samps$map_loaded %>% 
+  mutate(Location = as.factor(Location)) %>% 
+  arrange(Location) %>% 
+  rownames_to_column(var = "sample_name") %>% 
+  dplyr::select(sample_name) %>% 
+  unlist(use.names = FALSE)
+
+
+# make stacked barplots
+## bars by sample
+stbr_smp <- plot_taxa_bars(ts_class_rhizo, metadata_map = input_rar_samps$map_loaded, type_header = 'BoxCell', num_taxa = 10)+
+  scale_fill_manual(values = pal11)+
+  theme(axis.text.x = element_text(angle=90))+
+  scale_x_discrete(limits=c(order.p))
+stbr_smp
+
+## bars by locations
+stbr_loc <- plot_taxa_bars(ts_class_rhizo, metadata_map = input_rar_samps$map_loaded, type_header = 'Location', num_taxa = 10)+
+  scale_fill_manual(values = pal11)+
+  theme(axis.text.x = element_text(angle=90))
+  #scale_x_discrete(limits=c(orderS))
+stbr_loc 
+
+## bars by genotype
+stbr_gen <- plot_taxa_bars(ts_class_rhizo, metadata_map = input_rar_samps$map_loaded, type_header = 'Entry', num_taxa = 10)+
+  scale_fill_manual(values = pal11)+
+  theme(axis.text.x = element_text(angle=90))
+  #scale_x_discrete(limits=c(orderS))
+stbr_gen 
+
+#########################
+#########################
+# save
+ggsave(stbr_smp, filename = paste0(figures_02.fp, "/stbr_smp_class.png"), width = 12, height = 8, dpi = 300)
+ggsave(stbr_loc, filename = paste0(figures_02.fp, "/stbr_loc_class.png"), width = 12, height = 8, dpi = 300)
+ggsave(stbr_gen, filename = paste0(figures_02.fp, "/stbr_gen_class.png"), width = 12, height = 8, dpi = 300)
+
+```
+
+
+## richness
+```{r}
+## ASV stats: summary of # ASVS / sample
+### rarefied data
+colSums(input_rar_samps$data_loaded !=0) %>% summary()
+#   Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+#   602    1518    1715    1718    1960    2495  
+### relative abundance data
+colSums(input_rl_samps$data_loaded !=0) %>% summary()
+   # Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+   # 598    1634    1950    2062    2446    3887 
+
+rhz_rich.df <- input_rar_samps$map_loaded %>% 
+ rownames_to_column(var = "sample_id") %>% 
+left_join(data.frame(Richness = colSums(inputf2_rhizo.chem$data_loaded != 0)) %>%
+               rownames_to_column(), by = c("sample_id" = "rowname"))
+
+## plot richness per condition
+rhz_rich.x.cond <- ggplot(rhz_rich.df, aes(x = condition, y = Richness, fill = condition))+
+         geom_boxplot()+
+  scale_fill_manual(values = pair.pal2)+
+  scale_x_discrete(limits = c("B","M1", "S1", "M2", "S2", "M3", "S3", "M4", "S4", "M5", "S5"))+
+  theme_bw()
+```
+
+## NMDS ordinations
+```{r}
+input_rar$map_loaded$Rep <- as.factor(input_rar$map_loaded$Rep)
+## distance matrix for plotting
+sb_transformed.r1 <- t(sqrt(input_rar$data_loaded))
+dm.r1 <- vegdist(sb_transformed.r1, method = "bray")
+sb.r1.nmds <- metaMDS(dm.r1, k = 2, trymax = 1000)
+
+## plot NMDS (all samples, colored by location)
+nmds_r1 <- plot_ordination(input = input_rar, ordination_axes = sb.r1.nmds$points, color_cat = 'Location', shape_cat = 'Rep')+ #Entry, Location, Average.of.percent.incidence, LONG, LAT
+  ggtitle("NMDS plot of rarefied bacterial reads - colored by sclr resistance")+
+  #scale_color_manual(values = pal11)
+  scale_color_viridis(option = "magma", begin = 0.2, end = 0.8, discrete = TRUE)
+  #theme(legend.position = "none")
+nmds_r1
+
+#ggsave(nmds_r1, filename = paste0(figures_02.fp, "/nmdsall_r1_locrep.png"), height = 8, width = 10)
+```
+
+### PERMANOVA
+```{r}
+input_rar$map_loaded$Location <- as.factor(input_rar$map_loaded$Location)
+input_rar$map_loaded$Entry <- as.factor(input_rar$map_loaded$Entry)
+
+# PERMANOVA: measure the effect of Location, Entry (aka genotype), Replicate on microbiome composition
+pnova_loc.gen <- adonis2(formula = dm.r1 ~ Location + Entry + Rep, 
+                   data = input_rar$map_loaded, 
+                   perm = 1000, 
+                  by="margin")
+pnova_loc.gen
+
+
+
+```
+
+
+### MANTEL TESTS
+#### calculate geospatial info
+```{r}
+#https://community.rstudio.com/t/calculating-the-geographic-distance-between-coordinates/69455
+## how far apart are different locations? Create geospatial distance matrix
+sf_input <- structure(list(longitude = c(input_relab$map_loaded$LONG), 
+                           latitude = c(input_relab$map_loaded$LAT)), 
+                          row.names = c(input_relab$map_loaded$BoxCell), class = "data.frame")
+
+geospatial_sf <- st_as_sf(sf_input, coords = c("longitude", "latitude"), crs = 4326) 
+
+dm_geospatial <- st_distance(geospatial_sf)
+
+###################
+###################
+
+#h ttps://jkzorz.github.io/2019/07/08/mantel-test.html
+geo = data.frame(input_relab$map_loaded$LONG, input_relab$map_loaded$LAT)
+d.geo = distm(geo, fun = distHaversine)
+dist.geo = as.dist(d.geo)
+```
+
+#### community distance :: geospatial distance
+```{r}
+## distance matrix for relative abundance data
+sb_transformed.rl <- t(sqrt(input_relab$data_loaded))
+dm.rl <- vegdist(sb_transformed.rl, method = "bray")
+
+
+## Mantel test of 16S distance :: geospatial distance
+geospat_mantel <- mantel(dm.rl, dist.geo)#dm_geospatial
+#dm_geospatial & dist.geo (both same result)
+# Mantel statistic r: 0.4546 
+#       Significance: 0.001 
+
+geosp.data <- mctoolsr::convert_dm_to_3_column(as.dist(dm_geospatial))
+```
+
+
+#### sclerotinia resistance :: community distance
+```{r}
+##distance matrix for sclerotinia resistance 
+dist.sclres <- dist(input_relab$map_loaded$Average.of.percent.incidence, method = "euclidean")
+
+## Mantel test of 16S distance :: sclerotinia resistance distance
+sclr.res_mantel <- mantel(dm.rl, dist.sclres)
+```
+
+### Individual location NMDS
+#### Make location-specific dataframes
+```{r}
+#input_Mentor, input_Ralls, input_Kirkmeyer, input_Mandan, input_Pierre, input_Brookings, input_Burlington, input_Velva 
+# input_Carrington, input_Casselton, input_Grandin, input_Lindsborg.dry, input_Lindsborg.irr, input_McLaughlin, input_Land.inst
+input_Mentor <- filter_data(input = input_rar, filter_cat = "Location", keep_vals = "Mentor")
+input_Ralls <- filter_data(input = input_rar, filter_cat = "Location", keep_vals = "Ralls")
+input_Kirkmeyer <- filter_data(input = input_rar, filter_cat = "Location", keep_vals = "Kirkmeyer")
+input_Mandan <- filter_data(input = input_rar, filter_cat = "Location", keep_vals = "Mandan")
+input_Pierre <- filter_data(input = input_rar, filter_cat = "Location", keep_vals = "Pierre")
+
+input_Brookings <- filter_data(input = input_rar, filter_cat = "Location", keep_vals = "Brookings")
+input_Burlington <- filter_data(input = input_rar, filter_cat = "Location", keep_vals = "Burlington")
+input_Carrington <- filter_data(input = input_rar, filter_cat = "Location", keep_vals = "Carrington")
+input_Casselton <- filter_data(input = input_rar, filter_cat = "Location", keep_vals = "Casselton")
+input_Grandin <- filter_data(input = input_rar, filter_cat = "Location", keep_vals = "Grandin")
+
+input_Lindsborg.dry <- filter_data(input = input_rar, filter_cat = "Location", keep_vals = "Lindsborg-dryland")
+input_Lindsborg.irr <- filter_data(input = input_rar, filter_cat = "Location", keep_vals = "Lindsborg-irrigated")
+input_McLaughlin <- filter_data(input = input_rar, filter_cat = "Location", keep_vals = "McLaughlin")
+input_Land.inst <- filter_data(input = input_rar, filter_cat = "Location", keep_vals = "Land Institute")
+input_Velva <- filter_data(input = input_rar, filter_cat = "Location", keep_vals = "Velva")
+
+```
+
+## NMDS ordinations
+```{r}
+# swap out location here
+location_input <- input_Grandin
+location_input$map_loaded$Rep <- as.factor(location_input$map_loaded$Rep)
+
+## distance matrix for plotting
+sb_transformed.loc <- t(sqrt(location_input$data_loaded))
+dm.loc <- vegdist(sb_transformed.loc, method = "bray")
+sb.loc.nmds <- metaMDS(dm.loc, k = 2, trymax = 1000)
+
+#names(input_filt_rar$map_loaded)
+
+## plot NMDS (for each individual location, colored by entry and shaped by replicate)
+nmds_loc <- plot_ordination(input = location_input, ordination_axes = sb.loc.nmds$points, color_cat = 'Entry', shape_cat = "Rep", hulls = TRUE)+ #Entry, Location, Average.of.percent.incidence, LONG, LAT
+  ggtitle("NMDS plot of Grandin - colored by genotype")+
+  scale_color_manual(values = pal11)+
+  scale_fill_manual(values = pal11)
+  #scale_color_viridis(option = "magma", begin = 0.2, end = 0.8, discrete = TRUE)
+  #theme(legend.position = "none")
+nmds_loc
+
+#ggsave(nmds_r1, filename = paste0(figures_02.fp, "/nmdsall_r1_sclr.res.png"), height = 8, width = 10)
+```
+
+# PERMANOVAS, DISPERSION BY LOCATION
+```{r}
+inputs_locations <- list(input_Ralls, input_Lindsborg.dry, input_Lindsborg.irr, input_Land.inst, input_Burlington,input_Kirkmeyer,input_Brookings, input_Pierre, input_McLaughlin,input_Mandan,  input_Grandin,  input_Carrington,     input_Mentor, input_Velva)
+
+loc.names <- c("Ralls", "Lindsborg-dryland", "Lindsborg-irrigated", "Land Institute", "Burlington", "Kirkmeyer", "Brookings", "Pierre", "McLaughlin", "Mandan", "Grandin", "Carrington", "Mentor", "Velva")
+
+#input_Casselton removed because it has a different number of samples, throwing off the loop
+
+# create matrices for loop input
+## length of the list (so the loop knows how many times to loop - 15 locations)
+iterations = 14
+
+## variables (contents of output)
+pnova.variables = 6
+disp.variables = 10
+
+## make an empty matrix to store results
+pnova_output <- matrix(ncol=pnova.variables, nrow=iterations) 
+disp_output <- matrix(ncol=disp.variables, nrow=iterations)
+mdiss_output <- vector(mode = 'list', length = 14)
+
+
+## loop for all locations
+for (i in 1:iterations){
+  # create distance matrix
+  tmp_transformed.df <- t(sqrt(inputs_locations[[i]]$data_loaded))
+  dm_tmp <- vegdist(tmp_transformed.df, method = "bray")
+
+  # perform permanova
+  pnova_tmp <- adonis2(formula = dm_tmp ~ Entry + Rep, 
+                   data = inputs_locations[[i]]$map_loaded, 
+                   perm = 1000, 
+                  by="margin")
+  tmp_row <- c(pnova_tmp$R2[1:2], pnova_tmp$F[1:2],pnova_tmp$`Pr(>F)`[1:2])
+  pnova_output[i,] <- tmp_row 
+
+  # calculate dispersion
+  disper_tmp <- betadisper(dm_tmp, group = inputs_locations[[i]]$map_loaded$Entry, type = "centroid")
+  tmp_disp_row <- disper_tmp$group.distances  
+  disp_output[i,] <- tmp_disp_row
+  
+  # calculate mean dissimilarities
+  mean.diss_tmp <- calc_mean_dissimilarities(dm = dm_tmp, metadata_map = inputs_locations[[i]]$map_loaded, summarize_by_factor = "Entry", return_map = FALSE)
+  mean.diss.3col <- convert_dm_to_3_column(mean.diss_tmp)
+  mdiss_output[[i]] <- mean.diss.3col
+}
+
+# format tables
+pnova_output <- as.data.frame(pnova_output)
+disp_output <- as.data.frame(disp_output)
+
+names(pnova_output) <- c("R2_Entry", "R2_Rep", "F_Entry", "F_Rep", "pval_Entry", "pval_Rep")
+names(disp_output) <- c("HA466", "PI507903", "PI531360", "PI531361", "PI650542", 
+                       "PI650758","PI650808", "PI650814", "PI650836", "PI650839")
+rownames(pnova_output) <- loc.names
+rownames(disp_output) <- loc.names
+
+## reformat list into big dataframe
+mean.diss.df <- bind_rows(mdiss_output, .id = "column_label") %>% as.data.frame()
+mean.diss.df$Location <- c(rep("Mentor", 45), 
+                          rep("Ralls", 45),
+                          rep("Kirkmeyer", 45),
+                          rep("Mandan", 45) ,
+                          rep("Pierre", 45),
+                          rep("Brookings", 45),
+                          rep("Burlington", 45),
+                          rep("Velva", 45),
+                          rep("Carrington", 45),
+                          rep("Grandin", 45),
+                          rep("Lindsborg.dry", 45),
+                          rep("Lindsborg.irr", 45),
+                          rep("McLaughlin", 45),
+                          rep("Land.inst", 45))
+
+```
+
+#### visualize mean dissimilarities data
+```{r}
+ggplot(mean.diss.df, aes(x=x1, y = dist, color= Location))+
+  geom_point()+
+  facet_wrap(~x2)
+
+tmp <- mean.diss.df %>% 
+  group_by(x1, x2) %>% 
+    summarize(mean = mean(dist), 
+              stdev = sd(dist))
+```
+
+#### visualize disperasion data
+```{r}
+disp_4plot.df <- disp_output %>% 
+  rownames_to_column(var = "Location") %>% 
+  pivot_longer(!Location, names_to = "genotype", values_to = "dispersion")
+
+
+disp.x.gen_anova <- aov(formula = dispersion~genotype, data = disp_4plot.df)
+summary(anova)
+
+ggplot(disp_4plot.df, aes(x = Location, y = dispersion, group = genotype, fill = genotype))+
+  geom_col(position = 'dodge')+
+  theme_minimal(base_size = 18)+
+  scale_fill_manual(values = pal11)+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = .5))
+```
+
+### pairwise mantel loop
+```{r}
+#inputs_locations[[1]]$data_loaded
+mantel_output <- matrix(ncol = 4)
+# For location list for x in 0:8
+# For location list y in x+1 to 9
+for (i in 1:13){
+  for(j in (i+1):14){
+    
+    dm1 <- calc_dm(tax_table = inputs_locations[[i]]$data_loaded, method = 'bray_sq_trans')
+    dm2 <- calc_dm(tax_table = inputs_locations[[j]]$data_loaded, method = 'bray_sq_trans')
+    
+    mean.diss1 <- calc_mean_dissimilarities(dm = dm1, metadata_map = inputs_locations[[i]]$map_loaded, 
+                                            summarize_by_factor = "Entry", return_map = FALSE)
+    mean.diss2 <- calc_mean_dissimilarities(dm = dm2, metadata_map = inputs_locations[[j]]$map_loaded, 
+                                            summarize_by_factor = "Entry", return_map = FALSE)
+      
+    mantel.tmp <- mantel(xdis = mean.diss1, ydis = mean.diss2, permutations = 1000)
+    
+    row.tmp <- c(mantel.tmp$statistic, mantel.tmp$signif, inputs_locations[[i]]$map_loaded$Location[1], inputs_locations[[j]]$map_loaded$Location[1])
+    mantel_output <- rbind(mantel_output, row.tmp) 
+  }
+}
+
+mantel_output = mantel_output[-1,]
+mantel_output = as.data.frame(mantel_output)
+
+names(mantel_output) <- c("mantel_r", "mantel_pval", "loc1", "loc2")
+
+mantel_output$mantel_r <- as.numeric(mantel_output$mantel_r)
+mantel_output$mantel_pval <- as.numeric(mantel_output$mantel_pval)
+
+mantel_output.f <- mantel_output %>% 
+  mutate(mantel_r.2 = round(mantel_r, 2)) %>% 
+  mutate(mantel_p.2 = round(mantel_pval, 2))
+```
+
+#### plot mantel results
+```{r}
+ggplot(data = mantel_output.f, aes(x=loc1, y=loc2, fill=mantel_r.2)) + 
+  geom_tile()+
+  scale_x_discrete(limits =  loc.names)+
+  scale_y_discrete(limits =  loc.names)+
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", 
+   midpoint = 0, limit = c(-1,1), space = "Lab", 
+   name="Mantel r") +
+    theme_minimal()+
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1))+
+  geom_text(aes(x=loc1, y=loc2, label = mantel_r.2), color = "black", size = 4)
+```
+

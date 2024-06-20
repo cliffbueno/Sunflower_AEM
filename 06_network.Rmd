@@ -1,0 +1,152 @@
+---
+title: "06_network"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load libraries
+```{r}
+library(mctoolsr) # For inputting, rarefying, filtering, taxonomic analyses
+library(plyr) # For data manipulation
+library(data.table) # For working with large files (data tables)
+library(tidyverse) # For data manipulation and plotting
+library(ggplot2) # For plotting
+library(RColorBrewer) # For pretty colors
+library(igraph) # For network generation and plotting
+library(sna) # For network analyses
+library(bipartite) # For network generation and metrics
+library(corrr) # For calculations
+library(viridis) # For coloring and plotting
+
+#library(forcats) # for neat ordering of factors when graphing
+#library(ggrepel) # for making nice repelling labels
+
+set.seed(10)
+```
+
+### Set up input and output directories
+```{r Set up input and output directories, include = FALSE}
+project.fp <- "/Users/coin8046/Desktop/FiererLabNotebook_copy/SunflowerGxE/r_analyses"
+raw_data.fp <- file.path(project.fp, "00_raw.data")
+clean_data.fp <- file.path(project.fp, "01_clean.data")
+    figures_01_clean.fp <- file.path(clean_data.fp, "figures")
+    outputs_01_clean.fp <- file.path(clean_data.fp, "outputs")
+
+network_06.fp <- file.path(project.fp, "02_exploration")
+    figures_06.fp <- file.path(network_06.fp, "figures")
+    outputs_06.fp <- file.path(network_06.fp, "outputs")
+
+# if (!dir.exists(network_06.fp)) {dir.create(network_06.fp, recursive = TRUE)}
+# if (!dir.exists(figures_06.fp)) {dir.create(figures_06.fp, recursive = TRUE)}
+# if (!dir.exists(outputs_06.fp)) {dir.create(outputs_06.fp, recursive = TRUE)}
+```
+
+### Read in 16S data
+```{r}
+## cleaned data
+input_filt <- readRDS(paste0(outputs_01_clean.fp, "/input_filt.RDS"))
+
+## rarefied data
+input_rar <- readRDS(paste0(outputs_01_clean.fp, "/input_filt_rar9k.RDS"))
+
+## relative abundance data
+input_relab <- readRDS(paste0(outputs_01_clean.fp, "/input_filt_relab.RDS"))
+
+```
+
+### Split dataset into dfs per location
+```{r}
+# Mentor, Ralls, Kirkmeyer, Mandan, Pierre
+# based on location in ordination (spread out)
+input_Mentor <- filter_data(input = input_relab, filter_cat = "Location", keep_vals = "Mentor")
+input_Ralls <- filter_data(input = input_relab, filter_cat = "Location", keep_vals = "Ralls")
+input_Kirkmeyer <- filter_data(input = input_relab, filter_cat = "Location", keep_vals = "Kirkmeyer")
+input_Mandan <- filter_data(input = input_relab, filter_cat = "Location", keep_vals = "Mandan")
+input_Pierre <- filter_data(input = input_relab, filter_cat = "Location", keep_vals = "Pierre")
+input_Carrington <- filter_data(input = input_relab, filter_cat = "Location", keep_vals = "Carrington")
+```
+
+### Get dataframes in order (ASV and plant genotype data)
+```{r}
+# From Elías
+
+# dataframe to work with
+input.loc <- input_Carrington
+
+# get dataframes in order
+bacAppend <- t(input.loc$data_loaded) %>% as.data.frame()
+plantAppend <- input.loc$map_loaded %>% 
+  dplyr::select("Entry")
+
+
+#Get them side by side so they can be part fo the same correlation matrix
+BacPlant <- cbind(plantAppend$Entry, bacAppend)
+
+#Taking the abundances of asvs in each sample
+BacPlant_sum <- BacPlant %>%
+  group_by(`plantAppend$Entry`) %>%
+  summarise_all(mean)
+summary(colSums(BacPlant_sum[2:length(BacPlant_sum)]))
+
+
+# filter to keep only reasonably abundant ASVs (change the "filt_val as needed")
+filt_val <- 5.135e-02
+
+BacPlant_sum.filt <- BacPlant_sum[2:length(BacPlant_sum)] %>% 
+  dplyr::select(where(~ sum(.) >= filt_val)) %>% 
+  as.data.frame()
+rownames(BacPlant_sum.filt) <- BacPlant_sum$`plantAppend$Entry`
+
+```
+
+## Network construction and plotting
+### igraoh graph_from_incidence_matrix (from matrix)
+```{r}
+# see https://r-inspirations.blogspot.com/2016/08/create-bipartite-graph-with-igraph.html
+
+# create network graph from matrix
+#net2 <- graph_from_incidence_matrix(BacPlant_sum.filt, weighted = TRUE)
+g <- graph.incidence(BacPlant_sum.filt, weighted = T)
+
+# change to bipartite projection if needed
+#net2.bp <- bipartite.projection(net2)
+
+# label vertex attributes for plotting
+V(g)$color <- V(g)$type
+V(g)$color <- c("orange", "steel blue")[V(g)$type+1]
+V(g)$shape <- c("circle", "square")[V(g)$type+1]
+
+plot(g, edge.color="gray30",edge.width=E(g)$weight, layout=layout_as_bipartite)
+
+
+# play with different layout options
+l <- layout_with_fr(g) #layout_with_kk(net2)
+l <- norm_coords(l, ymin=0, ymax=1, xmin=0, xmax=1)
+
+#########################
+#########################
+# plot, trying different methods and settings
+
+## plot with out labels
+net2.yb <- plot(g, vertex.label=NA, vertex.size=(vertex.size=(V(g)$type+1)*5), layout = l*10, edge.width = 2)
+
+## plot with labels
+net2.yb.lab <- plot(x = g, vertex.label.cex = 1, vertex.size=(vertex.size=(V(g)$type+1)*5), layout = l*10)
+
+#############
+# saving figs
+#############
+# "outputs/network/network_fig"
+png(filename="outputs/network/network_fig/net_yellowblue.12.11.png", 3000, 3000)
+plot(net2, vertex.label=NA, vertex.size=(vertex.size=(V(net2)$type+1)*5), layout = l*10, edge.width = 5, edge.color = "dark grey")
+dev.off()
+
+png(filename="outputs/network/network_fig/net_yellowblue_labs.12.11.png", 3000, 3000)
+plot(net2, vertex.label.cex = 1.5, vertex.size=(vertex.size=(V(net2)$type+1)*5), layout = l*10, edge.width = 5, edge.color = "dark grey")
+dev.off()
+
+```
+

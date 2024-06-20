@@ -1,0 +1,263 @@
+---
+title: "07_more.Models"
+output: html_document
+---
+## Load libraries
+```{r}
+library(mctoolsr)
+library(plyr) # always load before tidyverse to avoid conflicts with dplyr
+library(dplyr)
+library(tidyverse) # lazily load all of tidyverse, just in case I want to use it.
+library(vegan)
+library(MASS)
+library(wesanderson)
+library(viridis)
+library(edgeR)
+library(car)
+library(performance)
+library(lme4)
+library(nlme)
+library(lmerTest)
+library(compositions)
+library(ggplot2)
+```
+
+### Set up input and output directories
+```{r Set up input and output directories, include = FALSE}
+project.fp <- "/Users/coin8046/Desktop/FiererLabNotebook_copy/SunflowerGxE/r_analyses"
+
+climate_05.fp <- file.path(project.fp, "05_ClimateData")
+    outputs_05.fp <- file.path(climate_05.fp, "outputs")
+    
+models_07.fp <- file.path(project.fp, "07_MoreModels")
+    figures_07.fp <- file.path(models_07.fp, "figures")
+    outputs_07.fp <- file.path(models_07.fp, "outputs")
+
+ # if (!dir.exists(models_07.fp)) {dir.create(models_07.fp, recursive = TRUE)}
+ # if (!dir.exists(figures_07.fp)) {dir.create(figures_07.fp, recursive = TRUE)}
+ # if (!dir.exists(outputs_07.fp)) {dir.create(outputs_07.fp, recursive = TRUE)}
+```
+
+
+### Read in data
+NOTE: this data has the updated climate information
+```{r}
+## filtered data
+input_filt <- readRDS(paste0(outputs_05.fp, "/input.filtC.RDS"))
+
+## more stringently filtered data
+input_filt2 <- readRDS(paste0(outputs_05.fp, "/input.filt2C.RDS"))
+```
+
+
+
+### Collapse taxonomy to genera
+```{r}
+input_genera <- input_filt2
+
+#summarize taxnomy to genus level
+input_genera.tb <- summarize_taxonomy(input = input_filt2, report_higher_tax = TRUE, level = 6, relative = TRUE)
+
+## get top genera
+top.gen <- rowSums(x = input_genera.tb) %>% sort(decreasing = TRUE) %>% head(n=20)
+
+tax_gen <- input_genera.tb %>% 
+  rownames_to_column(var = "tax") %>% 
+  separate(col = tax, into = c("tax1", "tax2", "tax3", "tax4", "tax5", "tax6"), sep = ";")
+  
+### make model input (this is relative abundance normalized data)
+model.genera <- input_genera.tb %>% t() %>% as.data.frame() %>% 
+  rownames_to_column(var = "SampleID") %>% 
+  inner_join(input_genera$map_loaded, by=c("SampleID" = "BoxCell")) %>% 
+  column_to_rownames(var = "SampleID")
+
+
+```
+
+### Build models
+#### genera relative abundance input
+```{r}
+#model.genera
+
+glm1 <- glm(`Bacteria; Proteobacteria; Gammaproteobacteria; Burkholderiales; Burkholderiaceae; Burkholderia-Caballeronia-Paraburkholderia` ~ Entry, data = model.genera)
+summary(glm1)
+
+lmer1 <- lmer(`Bacteria; Proteobacteria; Gammaproteobacteria; Burkholderiales; Burkholderiaceae; Burkholderia-Caballeronia-Paraburkholderia` ~ Entry + (1| Location/Entry), model.genera)
+summary(lmer1)
+
+lmer2 <- lmer(`Bacteria; Proteobacteria; Gammaproteobacteria; Burkholderiales; Burkholderiaceae; Burkholderia-Caballeronia-Paraburkholderia` ~ Average.of.percent.incidence + (1| Location/Entry), model.genera)
+summary(lmer2)
+
+lmer3 <- lmer(`Bacteria; Proteobacteria; Gammaproteobacteria; Burkholderiales; Burkholderiaceae; Burkholderia-Caballeronia-Paraburkholderia` ~ 1 + (1|Entry) + (1 |Location), model.genera)
+summary(lmer3)
+
+lmer4 <- lmer(`Bacteria; Proteobacteria; Gammaproteobacteria; Burkholderiales; Burkholderiaceae; Burkholderia-Caballeronia-Paraburkholderia` ~ (1|Entry) + (1 |LAT), model.genera)
+summary(lmer4)
+
+lmer5 <- lmer(`Bacteria; Proteobacteria; Gammaproteobacteria; Burkholderiales; Burkholderiaceae; Burkholderia-Caballeronia-Paraburkholderia` ~ (1|Entry) + (1 |LAT) + (1 | Rep) + (1|Average.of.percent.incidence), model.genera)
+summary(lmer5)
+#Warning in checkConv(attr(opt, "derivs"), opt$par, ctrl = control$checkConv,  :
+  # Model failed to converge with max|grad| = 0.0026337 (tol = 0.002, component 1)
+
+lmer6 <- lmer(`Bacteria; Proteobacteria; Gammaproteobacteria; Burkholderiales; Burkholderiaceae; Burkholderia-Caballeronia-Paraburkholderia` ~ (1 |Location) + (1 | Rep) + (1|Average.of.percent.incidence), model.genera)
+
+summary(lmer6)
+```
+
+
+### OOTHER MODELING ATTEMPTS
+#### Get dataframes in order & NORMALIZE
+```{r}
+
+### clr transformation for model input
+# calculate the centered log-ratio using the compositions package
+input_clr <- input_filt2
+clr_relab <-t(clr(ifelse(t(input_clr$data_loaded) > 0, t(input_clr$data_loaded), 1)))
+input_clr$data_loaded <- clr_relab
+
+model.clr_tab <- input_clr$data_loaded %>% t() %>% as.data.frame() %>% 
+  rownames_to_column(var = "SampleID") %>% 
+  inner_join(input_clr$map_loaded, by=c("SampleID" = "BoxCell")) %>% 
+  column_to_rownames(var = "SampleID")
+
+### trimmed-means normalization
+input_tmm <- input_filt2
+input_tmm.data.t <- edgeR::normLibSizes(object = input_tmm$data_loaded)
+input_tmm.data <- edgeR::cpm(y = input_tmm$data_loaded, log = FALSE) %>% as.data.frame()
+
+### other normalization for model input
+#relative abundance
+input_relab2 <- input_filt2
+relab.df <- convert_to_relative_abundances(input = input_relab2)
+input_relab2$data_loaded <- relab.df$data_loaded
+
+model.relab_tab <- input_relab2$data_loaded %>% t() %>% as.data.frame() %>% 
+  rownames_to_column(var = "SampleID") %>% 
+  inner_join(input_relab2$map_loaded, by=c("SampleID" = "BoxCell")) %>% 
+  column_to_rownames(var = "SampleID")
+
+# OR rarefaction
+input_rar2 <- input_filt2
+rar.input <- single_rarefy(input = input_rar2, depth = 9000)
+rar.input2 <- filter_taxa_from_input(input = rar.input, taxa_IDs_to_remove =  lowASVs)
+input_rar2$data_loaded <- rar.input2$data_loaded
+
+model.rar_tab <- input_rar2$data_loaded %>% t() %>% as.data.frame() %>% 
+  rownames_to_column(var = "SampleID") %>% 
+  inner_join(input_rar2$map_loaded, by=c("SampleID" = "BoxCell")) %>% 
+  column_to_rownames(var = "SampleID")
+
+
+# CONVERT TO PRESENCE / ABSENCE
+## if fewer than 5 reads, absent
+input_pa <- input_filt2
+pa.df <- input_pa$data_loaded
+pa.df[pa.df<=5] = 0
+pa.df[pa.df>5] = 1
+
+input_pa$data_loaded <- pa.df %>% 
+  select_if(colSums(.) != 0) %>% 
+  filter(rowSums(.)!=0)
+
+model.pa_tab <- input_pa$data_loaded %>% t() %>% as.data.frame() %>% 
+  rownames_to_column(var = "SampleID") %>% 
+  inner_join(input_pa$map_loaded, by=c("SampleID" = "BoxCell")) %>% 
+  column_to_rownames(var = "SampleID") %>% 
+  mutate(lat.ord = factor(LAT, levels = sort(unique(LAT)), labels = 1:14))
+
+
+```
+
+### Binomial models WITH presence/absence data
+```{r}
+library(AICcmodavg)
+library(lmtest)
+
+# binomial models with presence / absence data
+
+mod.bn3 <- glmer(ASV_11 ~ (1|Average.of.percent.incidence) + (1|Location), family = binomial, data = model.pa_tab)
+
+mod.bn7 <- glmer(ASV_1 ~ (1|Entry) + (1|Location), family = binomial, data = model.pa_tab)
+
+
+summary(mod.bn3)
+summary(mod.bn7)
+
+
+## compare model performance
+models <- list(mod.bn3, mod.bn7)
+
+model.names <- c('m3',"m7")
+aictab(cand.set = models, modnames = model.names)
+
+lrtest(mod.bn3, mod.bn7)
+
+
+## other binomial models
+## singular fit models
+mod.bn4 <- glmer(ASV_1 ~ (1|Average.of.percent.incidence) + (1|Location)+ (1|GDD), family = binomial, data = model.pa_tab)
+#boundary (singular) fit: see help('isSingular')
+mod.bn8 <- glmer(ASV_1 ~ (1|Entry) + (1|Location)+ (1|Rep), family = binomial, data = model.pa_tab)
+#boundary (singular) fit: see help('isSingular')
+mod.bn1 <- glmer(ASV_1 ~ (1|Average.of.percent.incidence) + (1|Entry) + (1|LAT) + (1|Location), family = binomial, data = model.pa_tab)
+#boundary (singular) fit: see help('isSingular')
+mod.bn2 <- glmer(ASV_111 ~ Average.of.percent.incidence + (1|LAT) + (1|Location), family = binomial, data = model.pa_tab)
+#boundary (singular) fit: see help('isSingular')
+mod.bn5 <- glmer(ASV_1 ~ (1|Average.of.percent.incidence) + (1|Location)+ (1|CMI), family = binomial, data = model.pa_tab)
+#boundary (singular) fit: see help('isSingular')
+mod.bn6 <- glmer(ASV_1 ~ (1|Entry) + (1|Location) + (1|LAT), family = binomial, data = model.pa_tab)
+#boundary (singular) fit: see help('isSingular')
+mod.bn9 <- glmer(ASV_1 ~ (1|Average.of.percent.incidence) + (1|Location)+ (1|GDD), family = binomial, data = model.pa_tab)
+#boundary (singular) fit: see help('isSingular')
+mod.bn10 <- glmer(ASV_1 ~ (1|Entry) + (1|Location)+ (1|GDD), family = binomial, data = model.pa_tab)
+#boundary (singular) fit: see help('isSingular')
+mod.bn11 <- glmer(ASV_1 ~ (1|Entry) +  (1|LAT), family = binomial, data = model.pa_tab)
+#boundary (singular) fit: see help('isSingular')
+
+# depending on asv, models either say 
+# Warning in checkConv(attr(opt, "derivs"), opt$par, ctrl = control$checkConv,  :
+#   Model is nearly unidentifiable: large eigenvalue ratio
+#  - Rescale variables?
+
+# or
+
+# boundary (singular) fit: see help('isSingular')
+
+#mod.bn12 <- glmer(ASV_1 ~ Average.of.percent.incidence + (1|lat.ord), family = binomial, data = model.pa_tab)
+
+# Warning in checkConv(attr(opt, "derivs"), opt$par, ctrl = control$checkConv,  :
+#   Model is nearly unidentifiable: large eigenvalue ratio
+#  - Rescale variables?
+
+
+```
+
+### subset by location
+```{r}
+## Carrington
+carrington.pa_tab.r <- model.pa_tab %>% 
+  filter(Location == "Carrington")
+
+carrington.pa_tab.asv <- carrington.pa_tab.r[,1:10934] %>% 
+   select_if(colSums(.) != 0)
+
+carrington.pa_tab <- carrington.pa_tab.asv %>% 
+  cbind(carrington.pa_tab.r[,10935:ncol(carrington.pa_tab.r)])
+```
+
+### models by location
+```{r}
+mod.loc.bn3 <- glmer(ASV_100 ~ Average.of.percent.incidence + (1|Rep), family = binomial, data = carrington.pa_tab)
+
+mod.loc.bn7 <- glmer(ASV_100 ~ (1|Entry), family = binomial, data = carrington.pa_tab)
+
+mod.loc.bn1 <- glmer(ASV_100 ~ (1|Rep), family = binomial, data = carrington.pa_tab)
+
+models.loc <- list(mod.loc.bn3, mod.loc.bn7, mod.loc.bn1)
+
+model.loc.names <- c('m3',"m7", "m1")
+aictab(cand.set = models, modnames = model.loc.names)
+
+# all models: "boundary (singular) fit: see help('isSingular')"
+# challenge: within location a lot of ASVs are all present
+```

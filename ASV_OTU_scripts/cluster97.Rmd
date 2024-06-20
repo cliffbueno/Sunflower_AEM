@@ -1,0 +1,122 @@
+---
+title: "cluster97"
+output: html_document
+date: "2023-12-07"
+---
+## Load libraries
+```{r}
+library(tibble)
+library(dplyr)
+library(tidyverse) # lazily load all of tidyverse, just in case I want to use it.
+
+library(DECIPHER)
+library(Biostrings)
+
+# if (!require("BiocManager", quietly = TRUE))
+#     install.packages("BiocManager")
+# BiocManager::install(version = "3.18")
+
+# BiocManager::install("DECIPHER")
+# BiocManager::install("Biostrings")
+```
+
+### Set up input and output directories
+```{r Set up input and output directories, include = FALSE}
+project.fp <- "/home/corinne/Sunflower_GxE/dada2/16S"
+
+rawdata.fp <- file.path(project.fp, "03_tabletax")
+
+    
+cluster.fp <- file.path(project.fp, "Cluster97")
+    figures_c.fp <- file.path(cluster.fp, "figures")
+    outputs_c.fp <- file.path(cluster.fp, "outputs")
+
+ # if (!dir.exists(cluster.fp)) {dir.create(cluster.fp, recursive = TRUE)}
+ # if (!dir.exists(figures_c.fp)) {dir.create(figures_c.fp, recursive = TRUE)}
+ # if (!dir.exists(outputs_c.fp)) {dir.create(outputs_c.fp, recursive = TRUE)}
+```
+
+### Read in data
+```{r}
+## read in raw sequence table
+seqtab.r <- readRDS(paste0(rawdata.fp, "/seqtab_final.rds"))
+
+seqtab.f <- seqtab.r %>% t()  %>% as.data.frame() %>% 
+  dplyr::mutate(readsum = rowSums(.)) %>% 
+  filter(readsum > 20) %>% 
+  select(-readsum)
+
+seqtab <- seqtab.f %>% 
+  t() %>% as.matrix()
+```
+
+### get data into order
+```{r}
+asv_sequences <- colnames(seqtab)
+sample_names <- rownames(seqtab)
+
+dna <- Biostrings::DNAStringSet(asv_sequences)
+```
+
+### Begin clustering
+#### Find clusters of ASVs to form the new OTUs
+```{r}
+# NOTE #: see https://github.com/benjjneb/dada2/issues/947
+
+nproc <- 16 # set to number of cpus/processors to use for the clustering
+
+# align sequences and make distance matrix
+aln <- DECIPHER::AlignSeqs(dna, processors = nproc)
+saveRDS(aln, paste0(outputs_c.fp, "/aln.RDS"))
+
+d <- DECIPHER::DistanceMatrix(aln, processors = nproc)
+saveRDS(d, paste0(outputs_c.fp, "/dm.RDS"))
+
+# make 97% clusters
+clusters <- DECIPHER::TreeLine(
+  myDistMatrix=d,
+  method = "complete",
+  cutoff = 0.03, # use `cutoff = 0.03` for a 97% OTU
+  type = "clusters",
+  processors = nproc)
+
+saveRDS(clusters, paste0(outputs_c.fp, "/clusters.RDS"))
+```
+
+#### Use dplyr to merge the columns of the seqtab matrix for ASVs in the same OTU
+```{r}
+## or 
+merged_seqtab <- seqtab %>% 
+  t %>%
+  rowsum(clusters$cluster) %>%
+  t
+# Optional renaming of clusters to OTU<cluster #>
+colnames(merged_seqtab) <- paste0("OTU_", colnames(merged_seqtab))
+
+
+### another way
+# prep by adding sequences to the `clusters` data frame
+clusters2 <- clusters %>%
+  add_column(sequence = asv_sequences)
+
+merged_seqtab2 <- seqtab %>%
+  # setup: turn seqtab into a tibble with rows = ASVs and columns = samples
+  t %>%
+  as_tibble(rownames = "sequence") %>%
+  # add the cluster information
+  left_join(clusters2, by = "sequence") %>%
+  # merge ASVs in the same cluster, summing abundances within samples
+  group_by(cluster) %>%
+  summarize_at(vars(-sequence), sum) %>%
+  # Set new taxa names to OTU<cluster #> 
+  mutate(cluster = paste0("OTU_", cluster)) %>%
+  # convert back to a matrix in the original orientation
+  column_to_rownames("cluster") %>%
+  as("matrix") %>%
+  t
+
+saveRDS(clusters2, file = paste0(outputs_c.fp, "/clusters.RDS"))
+saveRDS(merged_seqtab2, file = paste0(outputs_c.fp, "/merged_seqtab.RDS"))
+
+```
+

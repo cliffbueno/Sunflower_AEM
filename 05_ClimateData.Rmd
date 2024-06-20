@@ -1,0 +1,222 @@
+---
+title: "05_climate"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load libraries
+```{r}
+library(mctoolsr)
+library(plyr) # always load before tidyverse to avoid conflicts with dplyr
+library(dplyr)
+library(tidyverse) # lazily load all of tidyverse, just in case I want to use it.
+library(vegan)
+library(MASS)
+library(wesanderson)
+library(viridis)
+library(edgeR)
+library(car)
+library(performance)
+library(lme4)
+library(nlme)
+library(lmerTest)
+library(compositions)
+library(ggplot2)
+library(ggrepel)
+
+library(sp)
+library(raster)
+library(sf)
+library(tmap)
+#library(maptools)
+#library(rgdal)
+library(dismo)
+library(usmap)
+library(ggspatial)
+library(spData)
+library(ggthemes)
+library(patchwork)
+library(ggforce)
+library(ggThemeAssist)
+library(devtools)
+library(readxl)
+
+set.seed(10)
+```
+
+### Set up input and output directories
+```{r Set up input and output directories, include = FALSE}
+project.fp <- "/Users/coin8046/Desktop/FiererLabNotebook_copy/SunflowerGxE/r_analyses"
+raw_data.fp <- file.path(project.fp, "00_raw.data")
+clean_data.fp <- file.path(project.fp, "01_clean.data")
+    figures_01_clean.fp <- file.path(clean_data.fp, "figures")
+    outputs_01_clean.fp <- file.path(clean_data.fp, "outputs")
+
+climate_05.fp <- file.path(project.fp, "05_ClimateData")
+    figures_05.fp <- file.path(climate_05.fp, "figures")
+    outputs_05.fp <- file.path(climate_05.fp, "outputs")
+
+ if (!dir.exists(climate_05.fp)) {dir.create(climate_05.fp, recursive = TRUE)}
+ if (!dir.exists(figures_05.fp)) {dir.create(figures_05.fp, recursive = TRUE)}
+ if (!dir.exists(outputs_05.fp)) {dir.create(outputs_05.fp, recursive = TRUE)}
+```
+
+### get climate data
+## from https://chelsa-climate.org/exchelsa-extended-bioclim/
+```{r}
+#downloaded from chelsa-climate.org Nov 2023
+myRasterCMI <- raster(paste0(raw_data.fp, "/CHELSA_cmi_mean_1981-2010_V.2.1.tif"))
+
+myRasterGGD <- raster(paste0(raw_data.fp, "/CHELSA_gdd0_1981-2010_V.2.1.tif"))
+```
+
+### Read in 16S data
+```{r}
+## cleaned data
+input_filt <- readRDS(paste0(outputs_01_clean.fp, "/input_filt.RDS"))
+
+## rarefied data
+input_rar <- readRDS(paste0(outputs_01_clean.fp, "/input_filt_rar9k.RDS"))
+
+## relative abundance data
+input_relab <- readRDS(paste0(outputs_01_clean.fp, "/input_filt_relab.RDS"))
+
+```
+
+### filter to decrease super rare ASVS
+```{r}
+#remove ASVs present in fewer than 30 samples
+low.tmp <- input_filt$data_loaded %>% 
+  mutate(ubiq = rowSums(. !=0)) %>% 
+  filter(ubiq < 30)
+
+lowASVs <- row.names(low.tmp)
+
+input_filt.rl <- filter_taxa_from_input(input = input_relab, taxa_IDs_to_remove =  lowASVs)
+nrow(input_filt.rl$data_loaded)
+# < 30:
+# 16968 taxa removed
+# 10960 remaining
+
+input_filt2 <- filter_taxa_from_input(input = input_filt, taxa_IDs_to_remove =  lowASVs)
+# < 30:
+# 16968 taxa removed
+# 10960 remaining
+```
+
+#### get metadata temporary dataframe
+```{r}
+map.r <- input_filt2$map_loaded
+
+map.r$State.x %>% unique()
+names(map.r)
+```
+
+### Setup data for map
+NOTE: this code is adapted from Kyle Keepers
+```{r}
+#Get a shapefile using "raster" package, then create a vector of states, then
+#subset by that vector
+myShapeFile <- raster::getData("GADM",country="USA",level=1)
+myStates <- c("Texas","Kansas","Colorado","North Dakota","South Dakota", "Oklahoma", "Nebraska", "Minnesota", "New Mexico", "Wyoming")
+state.sub <- myShapeFile[as.character(myShapeFile@data$NAME_1) %in% myStates, ]
+
+## get CMI data in order
+#Crop and mask. Not 100% sure what these steps do, but necessary
+precip.sub <- raster::crop(myRasterCMI,extent(state.sub))
+precip.sub <- raster::mask(precip.sub,state.sub)
+
+## get GGD (growing degree days) data in order
+#Crop and mask. Not 100% sure what these steps do, but necessary
+ggd.sub <- raster::crop(myRasterGGD,extent(state.sub))
+ggd.sub <- raster::mask(ggd.sub,state.sub)
+
+#Create vectors of the coordinates
+#then convert them to spatial points (??) so we can plot them on the map
+myCoords <- dplyr::select(map.r,LONG,LAT,Site) %>%
+  na.omit() %>%
+  unique() %>%
+  as.data.frame()
+
+#Do some converting
+myWestSpatialPoints <- SpatialPointsDataFrame(coords = myCoords[,c(1,2)], data = myCoords, proj4string = CRS("+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0"))
+```
+
+### Plot map
+Note:this code was adatped from Kyle Keepers
+```{r}
+set.seed(Sys.time())
+map.cmi <- tm_shape(precip.sub,alpha=0.3)+
+  tm_raster(title = "Mean CMI",n=6)+
+  tm_layout(legend.position = c("left","bottom"),legend.title.size = 2,legend.text.size = 1.25, legend.width = 2.5)+
+  tm_shape(state.sub)+
+  tm_borders(lwd=2)+
+  tm_shape(myWestSpatialPoints)+
+  tm_text("Site",col="black",size=1.25, auto.placement = TRUE)+
+  tm_symbols(shape=21,size=0.8,col="#F8766D",border.col = "black",border.lwd = 2)
+
+map.ggd <- tm_shape(ggd.sub,alpha=0.3)+
+  tm_raster(title = "Growing Degree Days > 0˚C",n=6)+
+  tm_layout(legend.position = c("left","bottom"),legend.title.size = 2,legend.text.size = 1.25, legend.width = 2.5)+
+  tm_shape(state.sub)+
+  tm_borders(lwd=2)+
+  tm_shape(myWestSpatialPoints)+
+  tm_text("Site",col="black",size=1.25, auto.placement = TRUE)+
+  tm_symbols(shape=21,size=0.8,col="#F8766D",border.col = "black",border.lwd = 2)
+ 
+```
+
+
+### Extract Climate Variables (Climate Moisture Index, GDD0) values for locations
+NOTE: this code was adapted from Kyle Keepers
+```{r}
+#First, subset location lat/long cols and remove any NAs
+coords <- map.r %>% 
+  dplyr::select(LONG,LAT,Location) %>%
+  na.omit() %>%
+  unique() %>%
+  as.data.frame() %>% 
+  remove_rownames() %>% 
+  column_to_rownames("Location")
+
+
+#Project the lat/long coordinates onto discrete cells in the raster (I think)
+points.cmi <- SpatialPoints(coords, proj4string = myRasterCMI@crs)
+points.gdd <- SpatialPoints(coords, proj4string = myRasterGGD@crs)
+
+#Extract the climate moisture index values at each of the 12 prairies
+CMI <- raster::extract(myRasterCMI, points.cmi)
+GDD <- raster::extract(myRasterGGD, points.gdd)
+
+#Add the CMI values to the "coords" array
+bind_coords_cmi <- cbind(coords, CMI) %>%
+  cbind(GDD) %>% 
+  rownames_to_column("Location")
+
+#Add them to the master data array for use throughout the rest of this script
+map.rr <- map.r %>%
+  rownames_to_column(var = "sampleID") %>% 
+  left_join(bind_coords_cmi) %>% 
+  mutate(cmi.scl = scale(CMI)) %>% 
+  mutate(gdd.scl = scale(GDD)) %>% 
+  mutate(Entry = as.factor(Entry)) %>% 
+  mutate(Location = as.factor(Location)) %>% 
+  column_to_rownames(var = "sampleID")
+```
+
+### add metadata to input (fir later downstream analyses)
+```{r}
+input_filt2$map_loaded <- map.rr
+
+input_filt$map_loaded <- map.rr
+
+saveRDS(object = input_filt2, file = paste0(outputs_05.fp, "/input.filt2C.RDS"))
+saveRDS(object = input_filt, file = paste0(outputs_05.fp, "/input.filtC.RDS"))
+  
+```
+
+
+
+
