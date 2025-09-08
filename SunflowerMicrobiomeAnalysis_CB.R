@@ -6803,12 +6803,12 @@ df6 <- input_filt_rare_16S$map_loaded %>%
   dplyr::select(sampleID, Site, Rep, Entry) %>%
   left_join(., ts6, by = "sampleID")
 prev_all <- df6 %>%
-  pivot_longer(cols = c(4:9), names_to = "OTU") %>%
+  pivot_longer(cols = c(5:10), names_to = "OTU") %>%
   group_by(OTU) %>%
   summarise(otu_n = sum(value > 0)) %>%
   mutate(otu_per = otu_n/587*100)
 prev_6 <- df6 %>%
-  pivot_longer(cols = c(4:9), names_to = "OTU") %>%
+  pivot_longer(cols = c(5:10), names_to = "OTU") %>%
   group_by(Site, OTU) %>%
   summarise(site_n = n(),
             otu_n = sum(value > 0)) %>%
@@ -6854,13 +6854,15 @@ for (i in 5:ncol(df6)) {
   nb1 <- glmm.nb(OTU ~ Site, random = ~ 1 | Entry, data = df)
   nb2 <- glmm.nb(OTU ~ Entry, random = ~ 1 | Site, data = df)
   nb2.1 <- glm.nb(OTU ~ Site + Rep + Entry, data = df)
-  #nb2.2 <- glm.nb(OTU ~ Entry, data = df)
-  nb3 <- MASS::glm.nb(OTU ~ Entry, data = df_car) # Not working but at least estimates theta
-  nb4 <- glm(OTU ~ Entry, data = df_car, family = negative.binomial(nb3$theta))
+  nb2.2 <- glm.nb(OTU ~ Site + Rep + Entry + Site:Entry, data = df)
+  #nb3 <- MASS::glm.nb(OTU ~ Entry, data = df_car) # Not working but at least estimates theta
+  #nb4 <- glm(OTU ~ Entry, data = df_car, family = negative.binomial(nb3$theta))
   c1 <- Anova(m, type = "III", singular.ok = TRUE)
   c2 <- Anova(nb1, type = "II", test.statistic = "F")
-  c3 <- car::Anova(nb2, type = "II", test.statistic = "F")
-  c4 <- Anova(nb4)
+  c3 <- Anova(nb2, type = "II", test.statistic = "F")
+  #c4 <- Anova(nb4)
+  c5 <- Anova(nb2.1, type = "II", test.statistic = "F")
+  c6 <- Anova(nb2.2, type = "II", test.statistic = "F")
   
   results6$SitePaov[i] <- c1$`Pr(>F)`[1]
   results6$GenotypePaov[i] <- c1$`Pr(>F)`[2]
@@ -6884,9 +6886,72 @@ for (i in 5:ncol(df6)) {
   results6$ShapiroNB1[i] <- s2$p.value
   results6$ShapiroNB2[i] <- s3$p.value
 }
-# Rerun manually for i = 9 and i = 10 to get around error
-i = 9
-i = 10
+
+
+
+# Update for Sclerotinia inhibitor paper
+results6 <- as.data.frame(matrix(NA, nrow = ncol(df6), ncol = 14)) %>%
+  set_names(c("OTU", "Heritability", "LeveneS", "LeveneG", "ShapiroAOV", "ShapiroNB1", "ShapiroNB2",
+              "SitePaov", "GenotypePaov", "IntPaov", "SitePnb", "GenotypePnb", "IntPnb",
+              "GenotypePnb_Car"))
+for (i in 5:ncol(df6)) {
+  # OTU name
+  results6$OTU[i] <- names(df6)[i]
+  
+  # Levene Test
+  l1 <- leveneTest(df6[,i] ~ df6$Site)
+  l2 <- leveneTest(df6[,i] ~ df6$Entry)
+  results6$LeveneS[i] <- l1$`Pr(>F)`[1]
+  results6$LeveneG[i] <- l2$`Pr(>F)`[1]
+  
+  # Make data frame with the predictors and each OTU
+  df <- df6 %>%
+    dplyr::select(Site, Rep, Entry, i) %>%
+    set_names(c("Site", "Rep", "Entry", "OTU"))
+  df_car <- df %>%
+    filter(Site == "Carrington")
+  
+  # Models
+  m <- aov(OTU ~ Site * Entry, data = df)
+  nb1 <- glmm.nb(OTU ~ Site, random = ~ 1 | Entry, data = df)
+  nb2 <- glmm.nb(OTU ~ Entry, random = ~ 1 | Site, data = df)
+  nb2.1 <- glm.nb(OTU ~ Site + Rep + Entry, data = df)
+  nb2.2 <- glm.nb(OTU ~ Site + Rep + Entry + Site:Entry, data = df)
+  #nb3 <- MASS::glm.nb(OTU ~ Entry, data = df_car) # Not working but at least estimates theta
+  #nb4 <- glm(OTU ~ Entry, data = df_car, family = negative.binomial(nb3$theta))
+  c1 <- Anova(m, type = "III", singular.ok = TRUE)
+  c2 <- Anova(nb1, type = "II", test.statistic = "F")
+  c3 <- Anova(nb2, type = "II", test.statistic = "F")
+  #c4 <- Anova(nb4)
+  c5 <- Anova(nb2.1, type = "II", test.statistic = "F")
+  c6 <- Anova(nb2.2, type = "II", test.statistic = "F")
+  
+  results6$SitePaov[i] <- c1$`Pr(>F)`[1]
+  results6$GenotypePaov[i] <- c1$`Pr(>F)`[2]
+  results6$IntPaov[i] <- c1$`Pr(>F)`[3]
+  
+  results6$SitePnb[i] <- c6$`Pr(>F)`[1]
+  results6$GenotypePnb[i] <- c6$`Pr(>F)`[3]
+  results6$IntPnb[i] <- c6$`Pr(>F)`[4]
+  #results6$GenotypePnb_Car[i] <- c4$`Pr(>Chisq)`[1]
+  
+  eta <- eta_sq_glm(nb2.2) %>%
+    as.data.frame() %>%
+    rownames_to_column(var = "variable") %>%
+    set_names(c("variable", "eta"))
+  
+  results6$Heritability[i] <- eta$eta[3]
+  
+  # Shapiro Test
+  s1 <- shapiro.test(m$residuals)
+  s2 <- shapiro.test(nb1$residuals)
+  s3 <- shapiro.test(nb2$residuals)
+  results6$ShapiroAOV[i] <- s1$p.value
+  results6$ShapiroNB1[i] <- s2$p.value
+  results6$ShapiroNB2[i] <- s3$p.value
+}
+
+
 
 # Process
 results6 <- results6 %>%
